@@ -58,11 +58,11 @@ mod app {
     // GPIO mappings
     type GpioUartTx = hal::gpio::bank0::Gpio0;
     type GpioUartRx = hal::gpio::bank0::Gpio1;
-    type GpioUsbLed = hal::gpio::bank0::Gpio25;
+    type GpioUsbLed = hal::gpio::bank0::Gpio26;
     type GpioIdleLed = hal::gpio::bank0::Gpio17;
     type GpioDebugOut = hal::gpio::bank0::Gpio15;
-    type GpioDebugIrqOut = hal::gpio::bank0::Gpio28;
-    type GpioDebugUsbIrqOut = hal::gpio::bank0::Gpio27;
+    type GpioDebugIrqOut = hal::gpio::bank0::Gpio20;
+    type GpioDebugUsbIrqOut = hal::gpio::bank0::Gpio21;
     // swd
     #[cfg(feature = "swd")]
     type GpioSwClk = hal::gpio::bank0::Gpio2;
@@ -242,15 +242,15 @@ mod app {
             )
         };
 
-        let usb_led = pins.led.into_push_pull_output();
+        let usb_led = pins.gpio26.into_push_pull_output();
         let (uart_rx_producer, uart_rx_consumer) = c.local.uart_rx_queue.split();
         let (uart_tx_producer, uart_tx_consumer) = c.local.uart_tx_queue.split();
 
         let mut debug_out = pins.gpio15.into_push_pull_output();
         debug_out.set_low().ok();
-        let mut debug_irq_out = pins.gpio28.into_push_pull_output();
+        let mut debug_irq_out = pins.gpio20.into_push_pull_output();
         debug_irq_out.set_low().ok();
-        let mut debug_usb_irq_out = pins.gpio27.into_push_pull_output();
+        let mut debug_usb_irq_out = pins.gpio21.into_push_pull_output();
         debug_usb_irq_out.set_low().ok();
 
         pins.gpio16.into_push_pull_output().set_high().ok();
