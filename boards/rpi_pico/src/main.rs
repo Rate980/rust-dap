@@ -17,7 +17,7 @@
 #![no_std]
 #![no_main]
 
-embedded_hal::digital::v2::InputPin::is_high(&mode_input)
+#[rtic::app(device = rp_pico::hal::pac, peripherals = true)]
 mod app {
     use panic_halt as _;
 
@@ -60,12 +60,12 @@ mod app {
     // GPIO mappings
     type GpioUartTx = hal::gpio::bank0::Gpio0;
     type GpioUartRx = hal::gpio::bank0::Gpio1;
-    type GpioUsbLed = hal::gpio::bank0::Gpio25;
+    type GpioUsbLed = hal::gpio::bank0::Gpio26;
     type GpioIdleLed = hal::gpio::bank0::Gpio17;
     type GpioDebugOut = hal::gpio::bank0::Gpio15;
-    type GpioDebugIrqOut = hal::gpio::bank0::Gpio28;
-    type GpioDebugUsbIrqOut = hal::gpio::bank0::Gpio27;
-
+    type GpioDebugIrqOut = hal::gpio::bank0::Gpio20;
+    type GpioDebugUsbIrqOut = hal::gpio::bank0::Gpio21;
+    #[cfg(feature = "jtag-swd")]
     // swd
     #[cfg(feature = "swd")]
     type GpioSwClk = hal::gpio::bank0::Gpio2;
@@ -100,6 +100,9 @@ mod app {
     unsafe impl Sync for UartWriter {}
     unsafe impl Send for UartReader {}
     unsafe impl Send for UartWriter {}
+    use embedded_hal::digital::v2::InputPin;
+
+    use hal::Clock;
 
     #[shared]
     struct Shared {
@@ -145,6 +148,7 @@ mod app {
             sio.gpio_bank0,
             &mut resets,
         );
+        let core = pac::CorePeripherals::take().unwrap();
 
         let mut watchdog = hal::Watchdog::new(c.device.WATCHDOG);
         let clocks = hal::clocks::init_clocks_and_plls(
@@ -158,6 +162,7 @@ mod app {
         )
         .ok()
         .unwrap();
+        let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().0);
 
         let uart_pins = (
             pins.gpio0.into_mode::<hal::gpio::FunctionUart>(), // TxD
@@ -257,10 +262,11 @@ mod app {
 
         #[cfg(feature = "jtag-swd")]
         let is_jtag = {
-            let mut mode_led = pins.gpio18.into_push_pull_output();
-            let mode_input = pins.gpio15.into_pull_down_input();
-            let tmp = mode_input.is_high().ok();
-            mode_led.set_state(tmp.into());
+            let mut mode_led = pins.gpio28.into_push_pull_output();
+            let mode_input = pins.gpio14.into_pull_down_input();
+            delay.delay_ms(1);
+            let tmp = mode_input.is_high().unwrap();
+            mode_led.set_state(tmp.into()).unwrap();
             tmp
         };
 
@@ -331,15 +337,15 @@ mod app {
             }
         };
 
-        let usb_led = pins.led.into_push_pull_output();
+        let usb_led = pins.gpio26.into_push_pull_output();
         let (uart_rx_producer, uart_rx_consumer) = c.local.uart_rx_queue.split();
         let (uart_tx_producer, uart_tx_consumer) = c.local.uart_tx_queue.split();
 
         let mut debug_out = pins.gpio15.into_push_pull_output();
         debug_out.set_low().ok();
-        let mut debug_irq_out = pins.gpio28.into_push_pull_output();
+        let mut debug_irq_out = pins.gpio20.into_push_pull_output();
         debug_irq_out.set_low().ok();
-        let mut debug_usb_irq_out = pins.gpio27.into_push_pull_output();
+        let mut debug_usb_irq_out = pins.gpio21.into_push_pull_output();
         debug_usb_irq_out.set_low().ok();
 
         pins.gpio16.into_push_pull_output().set_high().ok();
