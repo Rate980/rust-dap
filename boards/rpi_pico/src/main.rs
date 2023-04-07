@@ -17,7 +17,7 @@
 #![no_std]
 #![no_main]
 
-#[rtic::app(device = rp_pico::hal::pac, peripherals = true)]
+embedded_hal::digital::v2::InputPin::is_high(&mode_input)
 mod app {
     use panic_halt as _;
 
@@ -51,8 +51,10 @@ mod app {
         JtagResetPin,
     >;
     #[cfg(feature = "swd")]
+    #[cfg(not(feature = "jtag-swd"))]
     type IoSet = SwdIoSet;
     #[cfg(feature = "jtag")]
+    #[cfg(feature = "jtag-swd")]
     type IoSet = JtagIoSet;
 
     // GPIO mappings
@@ -63,6 +65,7 @@ mod app {
     type GpioDebugOut = hal::gpio::bank0::Gpio15;
     type GpioDebugIrqOut = hal::gpio::bank0::Gpio28;
     type GpioDebugUsbIrqOut = hal::gpio::bank0::Gpio27;
+
     // swd
     #[cfg(feature = "swd")]
     type GpioSwClk = hal::gpio::bank0::Gpio2;
@@ -113,12 +116,19 @@ mod app {
         uart_config: UartConfigAndClock,
         uart_rx_producer: heapless::spsc::Producer<'static, u8, UART_RX_QUEUE_SIZE>,
         usb_bus: UsbDevice<'static, UsbBus>,
+        #[cfg(not(feature = "jtag-swd"))]
         usb_dap: CmsisDap<'static, UsbBus, IoSet, 64>,
         usb_led: Pin<GpioUsbLed, Output<PushPull>>,
         idle_led: Pin<GpioIdleLed, Output<PushPull>>,
         debug_out: Pin<GpioDebugOut, Output<PushPull>>,
         debug_irq_out: Pin<GpioDebugIrqOut, Output<PushPull>>,
         debug_usb_irq_out: Pin<GpioDebugUsbIrqOut, Output<PushPull>>,
+        #[cfg(feature = "jtag-swd")]
+        jtag_dap: Option<CmsisDap<'static, UsbBus, JtagIoSet, 64>>,
+        #[cfg(feature = "jtag-swd")]
+        swd_dap: Option<CmsisDap<'static, UsbBus, SwdIoSet, 64>>,
+        #[cfg(feature = "jtag-swd")]
+        is_jtag: bool,
     }
 
     #[init(local = [
@@ -180,12 +190,14 @@ mod app {
         // Currently MCU reset pin is not used,
         // so all we have to do is just initialize the pin in case the pin is connected to the target RESET.
         #[cfg(feature = "swd")]
+        #[cfg(not(feature = "jtag-swd"))]
         {
             let mut n_reset_pin = pins.gpio4.into_push_pull_output();
             // RESET pin of Cortex Debug 10-pin connector is negarive logic
             // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
             n_reset_pin.set_high().ok();
         }
+        #[cfg(not(feature = "jtag-swd"))]
         #[cfg(feature = "swd")]
         let (usb_serial, usb_dap, usb_bus) = {
             let swdio;
@@ -213,6 +225,7 @@ mod app {
         };
 
         #[cfg(feature = "jtag")]
+        #[cfg(not(feature = "jtag-swd"))]
         let (usb_serial, usb_dap, usb_bus) = {
             let jtagio;
             #[cfg(feature = "bitbang")]
@@ -242,6 +255,82 @@ mod app {
             )
         };
 
+        #[cfg(feature = "jtag-swd")]
+        let is_jtag = {
+            let mut mode_led = pins.gpio18.into_push_pull_output();
+            let mode_input = pins.gpio15.into_pull_down_input();
+            let tmp = mode_input.is_high().ok();
+            mode_led.set_state(tmp.into());
+            tmp
+        };
+
+        #[cfg(feature = "jtag-swd")]
+        let mut jtag_dap = None;
+        #[cfg(feature = "jtag-swd")]
+        let mut swd_dap = None;
+        #[cfg(feature = "jtag-swd")]
+        let (usb_serial, usb_bus) = {
+            if !is_jtag {
+                let mut n_reset_pin = pins.gpio4.into_push_pull_output();
+                // RESET pin of Cortex Debug 10-pin connector is negarive logic
+                // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
+                n_reset_pin.set_high().ok();
+                let swdio;
+                #[cfg(feature = "bitbang")]
+                {
+                    use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
+                    let swclk_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
+                    let swdio_pin = PicoSwdInputPin::new(pins.gpio3.into_floating_input());
+                    swdio = SwdIoSet::new(swclk_pin, swdio_pin, CycleDelay {});
+                }
+                #[cfg(not(feature = "bitbang"))]
+                {
+                    let mut swclk_pin = pins.gpio2.into_mode();
+                    let mut swdio_pin = pins.gpio3.into_mode();
+                    swclk_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                    swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                    swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, &mut resets);
+                }
+                let (us, dap, ub) = initialize_usb(
+                    swdio,
+                    usb_allocator,
+                    "raspberry-pi-pico-swd",
+                    DapCapabilities::SWD,
+                );
+                swd_dap = Some(dap);
+                (us, ub)
+            } else {
+                let jtagio;
+                #[cfg(feature = "bitbang")]
+                {
+                    use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
+                    let tck_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
+                    let tms_pin = PicoSwdInputPin::new(pins.gpio3.into_floating_input());
+                    let tdo_pin = PicoSwdInputPin::new(pins.gpio5.into_floating_input());
+                    let tdi_pin = PicoSwdInputPin::new(pins.gpio6.into_floating_input());
+                    let trst_pin = PicoSwdInputPin::new(pins.gpio7.into_floating_input());
+                    let srst_pin = PicoSwdInputPin::new(pins.gpio4.into_floating_input());
+                    jtagio = JtagIoSet::new(
+                        tck_pin,
+                        tms_pin,
+                        tdi_pin,
+                        tdo_pin,
+                        trst_pin,
+                        srst_pin,
+                        CycleDelay {},
+                    );
+                }
+                let (us, dap, ub) = initialize_usb(
+                    jtagio,
+                    usb_allocator,
+                    "raspberry-pi-pico-jtag",
+                    DapCapabilities::JTAG,
+                );
+                jtag_dap = Some(dap);
+                (us, ub)
+            }
+        };
+
         let usb_led = pins.led.into_push_pull_output();
         let (uart_rx_producer, uart_rx_consumer) = c.local.uart_rx_queue.split();
         let (uart_tx_producer, uart_tx_consumer) = c.local.uart_tx_queue.split();
@@ -269,12 +358,19 @@ mod app {
                 uart_config,
                 uart_rx_producer,
                 usb_bus,
+                #[cfg(not(feature = "jtag-swd"))]
                 usb_dap,
                 usb_led,
                 idle_led,
                 debug_out,
                 debug_irq_out,
                 debug_usb_irq_out,
+                #[cfg(feature = "jtag-swd")]
+                jtag_dap,
+                #[cfg(feature = "jtag-swd")]
+                swd_dap,
+                #[cfg(feature = "jtag-swd")]
+                is_jtag,
             },
             init::Monotonics(),
         )
@@ -348,27 +444,54 @@ mod app {
         }
         c.local.debug_irq_out.set_low().ok();
     }
-
+    // #[cfg(not(feature = "jtag-swd"))]
+    // #[task(
+    //     binds = USBCTRL_IRQ,
+    //     priority = 2,   // USBCTRL_IRQ priority must be greater than or equal to UART0_IRQ not to hang up the UART when UART FIFO is full.
+    //     shared = [uart_reader, uart_writer, usb_serial, uart_rx_consumer, uart_tx_producer, uart_tx_consumer],
+    //     local = [usb_bus, usb_dap, uart_config, usb_led, debug_usb_irq_out],
+    // )]
+    #[cfg(feature = "jtag-swd")]
     #[task(
         binds = USBCTRL_IRQ,
         priority = 2,   // USBCTRL_IRQ priority must be greater than or equal to UART0_IRQ not to hang up the UART when UART FIFO is full.
         shared = [uart_reader, uart_writer, usb_serial, uart_rx_consumer, uart_tx_producer, uart_tx_consumer],
-        local = [usb_bus, usb_dap, uart_config, usb_led, debug_usb_irq_out],
+        local = [usb_bus, uart_config, usb_led, debug_usb_irq_out, jtag_dap, swd_dap, is_jtag],
     )]
     fn usbctrl_irq(mut c: usbctrl_irq::Context) {
         c.local.debug_usb_irq_out.set_high().ok();
 
+        #[cfg(not(feature = "jtag-swd"))]
         let poll_result = c
             .shared
             .usb_serial
             .lock(|usb_serial| c.local.usb_bus.poll(&mut [usb_serial, c.local.usb_dap]));
+
+        #[cfg(feature = "jtag-swd")]
+        let poll_result = c.shared.usb_serial.lock(|usb_serial| {
+            if *c.local.is_jtag {
+                c.local
+                    .usb_bus
+                    .poll(&mut [usb_serial, c.local.jtag_dap.as_mut().unwrap()])
+            } else {
+                c.local
+                    .usb_bus
+                    .poll(&mut [usb_serial, c.local.swd_dap.as_mut().unwrap()])
+            }
+        });
         if !poll_result {
             c.local.debug_usb_irq_out.set_low().ok();
             return; // Nothing to do at this time...
         }
         // Process DAP commands.
+        #[cfg(not(feature = "jtag-swd"))]
         c.local.usb_dap.process().ok();
-
+        #[cfg(feature = "jtag-swd")]
+        if *c.local.is_jtag {
+            c.local.jtag_dap.as_mut().unwrap().process().ok();
+        } else {
+            c.local.swd_dap.as_mut().unwrap().process().ok();
+        }
         // Process TX data.
         (&mut c.shared.usb_serial, &mut c.shared.uart_tx_producer).lock(
             |usb_serial, uart_tx_producer| {
